@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ignoreTags = []string{"title", "script", "style", "iframe", "frame", "frameset", "noframes", "noembed", "embed", "applet", "object", "base"}
+	defaultIgnoreTags = []string{"title", "script", "style", "iframe", "frame", "frameset", "noframes", "noembed", "embed", "applet", "object", "base"}
 
 	defaultTags = []string{"h1", "h2", "h3", "h4", "h5", "h6", "div", "span", "hr", "p", "br", "b", "i", "strong", "em", "ol", "ul", "li", "a", "img", "pre", "code", "blockquote", "article", "section"}
 
@@ -23,7 +23,7 @@ var (
 
 // HTMLAllowing sanitizes html, allowing some tags.
 // Arrays of allowed tags and allowed attributes may optionally be passed as the second and third arguments.
-func HTMLAllowing(s string, args ...[]string) (string, error) {
+func (san *Sanitizer) HTMLAllowing(s string, args ...[]string) (string, error) {
 
 	allowedTags := defaultTags
 	if len(args) > 0 {
@@ -56,16 +56,16 @@ func HTMLAllowing(s string, args ...[]string) (string, error) {
 		case parser.StartTagToken:
 
 			if len(ignore) == 0 && includes(allowedTags, token.Data) {
-				token.Attr = cleanAttributes(token.Attr, allowedAttributes)
+				token.Attr = san.cleanAttributes(token.Attr, allowedAttributes)
 				buffer.WriteString(token.String())
-			} else if includes(ignoreTags, token.Data) {
+			} else if includes(san.IgnoreTags, token.Data) {
 				ignore = token.Data
 			}
 
 		case parser.SelfClosingTagToken:
 
 			if len(ignore) == 0 && includes(allowedTags, token.Data) {
-				token.Attr = cleanAttributes(token.Attr, allowedAttributes)
+				token.Attr = san.cleanAttributes(token.Attr, allowedAttributes)
 				buffer.WriteString(token.String())
 			} else if token.Data == ignore {
 				ignore = ""
@@ -99,7 +99,7 @@ func HTMLAllowing(s string, args ...[]string) (string, error) {
 
 // HTML strips html tags, replace common entities, and escapes <>&;'" in the result.
 // Note the returned text may contain entities as it is escaped by HTMLEscapeString, and most entities are not translated.
-func HTML(s string) (output string) {
+func (san *Sanitizer) HTML(s string) (output string) {
 
 	// Shortcut strings with no tags in them
 	if !strings.ContainsAny(s, "<>") {
@@ -160,13 +160,13 @@ func HTML(s string) (output string) {
 }
 
 // We are very restrictive as this is intended for ascii url slugs
-var illegalPath = regexp.MustCompile(`[^[:alnum:]\~\-\./]`)
+var defaultIllegalPath = regexp.MustCompile(`[^[:alnum:]\~\-\./]`)
 
 // Path makes a string safe to use as a URL path,
 // removing accents and replacing separators with -.
 // The path may still start at / and is not intended
 // for use as a file system path without prefix.
-func Path(s string) string {
+func (san *Sanitizer) Path(s string) string {
 	// Start with lowercase string
 	filePath := strings.ToLower(s)
 	filePath = strings.Replace(filePath, "..", "", -1)
@@ -174,40 +174,40 @@ func Path(s string) string {
 
 	// Remove illegal characters for paths, flattening accents
 	// and replacing some common separators with -
-	filePath = cleanString(filePath, illegalPath)
+	filePath = san.cleanString(filePath, san.IllegalPath)
 
 	// NB this may be of length 0, caller must check
 	return filePath
 }
 
 // Remove all other unrecognised characters apart from
-var illegalName = regexp.MustCompile(`[^[:alnum:]-.]`)
+var defaultIllegalName = regexp.MustCompile(`[^[:alnum:]-.]`)
 
 // Name makes a string safe to use in a file name by first finding the path basename, then replacing non-ascii characters.
-func Name(s string) string {
+func (san *Sanitizer) Name(s string) string {
 	// Start with lowercase string
 	fileName := strings.ToLower(s)
 	fileName = path.Clean(path.Base(fileName))
 
 	// Remove illegal characters for names, replacing some common separators with -
-	fileName = cleanString(fileName, illegalName)
+	fileName = san.cleanString(fileName, san.IllegalName)
 
 	// NB this may be of length 0, caller must check
 	return fileName
 }
 
 // Replace these separators with -
-var baseNameSeparators = regexp.MustCompile(`[./]`)
+var defaultBaseNameSeparators = regexp.MustCompile(`[./]`)
 
 // BaseName makes a string safe to use in a file name, producing a sanitized basename replacing . or / with -.
 // No attempt is made to normalise a path or normalise case.
-func BaseName(s string) string {
+func (san *Sanitizer) BaseName(s string) string {
 
 	// Replace certain joining characters with a dash
-	baseName := baseNameSeparators.ReplaceAllString(s, "-")
+	baseName := san.BaseNameSeparators.ReplaceAllString(s, "-")
 
 	// Remove illegal characters for names, replacing some common separators with -
-	baseName = cleanString(baseName, illegalName)
+	baseName = san.cleanString(baseName, san.IllegalName)
 
 	// NB this may be of length 0, caller must check
 	return baseName
@@ -215,7 +215,7 @@ func BaseName(s string) string {
 
 // A very limited list of transliterations to catch common european names translated to urls.
 // This set could be expanded with at least caps and many more characters.
-var transliterations = map[rune]string{
+var defaultTransliterations = map[rune]string{
 	'À': "A",
 	'Á': "A",
 	'Â': "A",
@@ -290,12 +290,12 @@ var transliterations = map[rune]string{
 }
 
 // Accents replaces a set of accented characters with ascii equivalents.
-func Accents(s string) string {
+func (san *Sanitizer) Accents(s string) string {
 	// Replace some common accent characters
 	b := bytes.NewBufferString("")
 	for _, c := range s {
 		// Check transliterations first
-		if val, ok := transliterations[c]; ok {
+		if val, ok := san.Transliterations[c]; ok {
 			b.WriteString(val)
 		} else {
 			b.WriteRune(c)
@@ -308,14 +308,14 @@ var (
 	// If the attribute contains data: or javascript: anywhere, ignore it
 	// we don't allow this in attributes as it is so frequently used for xss
 	// NB we allow spaces in the value, and lowercase.
-	illegalAttr = regexp.MustCompile(`(d\s*a\s*t\s*a|j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*)\s*:`)
+	defaultIllegalAttr = regexp.MustCompile(`(d\s*a\s*t\s*a|j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*)\s*:`)
 
 	// We are far more restrictive with href attributes.
-	legalHrefAttr = regexp.MustCompile(`\A[/#][^/\\]?|mailto:|http://|https://`)
+	defaultLegalHrefAttr = regexp.MustCompile(`\A[/#][^/\\]?|mailto:|http://|https://`)
 )
 
 // cleanAttributes returns an array of attributes after removing malicious ones.
-func cleanAttributes(a []parser.Attribute, allowed []string) []parser.Attribute {
+func (san *Sanitizer) cleanAttributes(a []parser.Attribute, allowed []string) []parser.Attribute {
 	if len(a) == 0 {
 		return a
 	}
@@ -327,13 +327,13 @@ func cleanAttributes(a []parser.Attribute, allowed []string) []parser.Attribute 
 			val := strings.ToLower(attr.Val)
 
 			// Check for illegal attribute values
-			if illegalAttr.FindString(val) != "" {
+			if san.IllegalAttr.FindString(val) != "" {
 				attr.Val = ""
 			}
 
 			// Check for legal href values - / mailto:// http:// or https://
 			if attr.Key == "href" {
-				if legalHrefAttr.FindString(val) == "" {
+				if san.LegalHrefAttr.FindString(val) == "" {
 					attr.Val = ""
 				}
 			}
@@ -349,29 +349,29 @@ func cleanAttributes(a []parser.Attribute, allowed []string) []parser.Attribute 
 
 // A list of characters we consider separators in normal strings and replace with our canonical separator - rather than removing.
 var (
-	separators = regexp.MustCompile(`[ &_=+:]`)
+	defaultSeparators = regexp.MustCompile(`[ &_=+:]`)
 
-	dashes = regexp.MustCompile(`[\-]+`)
+	defaultDashes = regexp.MustCompile(`[\-]+`)
 )
 
 // cleanString replaces separators with - and removes characters listed in the regexp provided from string.
 // Accents, spaces, and all characters not in A-Za-z0-9 are replaced.
-func cleanString(s string, r *regexp.Regexp) string {
+func (san *Sanitizer) cleanString(s string, r *regexp.Regexp) string {
 
 	// Remove any trailing space to avoid ending on -
 	s = strings.Trim(s, " ")
 
 	// Flatten accents first so that if we remove non-ascii we still get a legible name
-	s = Accents(s)
+	s = san.Accents(s)
 
 	// Replace certain joining characters with a dash
-	s = separators.ReplaceAllString(s, "-")
+	s = san.Separators.ReplaceAllString(s, "-")
 
 	// Remove all other unrecognised characters - NB we do allow any printable characters
 	s = r.ReplaceAllString(s, "")
 
 	// Remove any multiple dashes caused by replacements above
-	s = dashes.ReplaceAllString(s, "-")
+	s = san.Dashes.ReplaceAllString(s, "-")
 
 	return s
 }
@@ -384,4 +384,49 @@ func includes(a []string, s string) bool {
 		}
 	}
 	return false
+}
+
+type Sanitizer struct {
+	IgnoreTags       []string
+	Transliterations map[rune]string
+	IllegalPath,
+	IllegalName,
+	BaseNameSeparators,
+	IllegalAttr,
+	LegalHrefAttr,
+	Separators,
+	Dashes *regexp.Regexp
+}
+
+func NewSanitizer() *Sanitizer {
+	return &Sanitizer{
+		IgnoreTags:         defaultIgnoreTags,
+		Transliterations:   defaultTransliterations,
+		IllegalPath:        defaultIllegalPath,
+		IllegalName:        defaultIllegalName,
+		BaseNameSeparators: defaultBaseNameSeparators,
+		IllegalAttr:        defaultIllegalAttr,
+		LegalHrefAttr:      defaultLegalHrefAttr,
+		Separators:         defaultSeparators,
+		Dashes:             defaultDashes,
+	}
+}
+
+func Accents(s string) string {
+	return NewSanitizer().Accents(s)
+}
+func BaseName(s string) string {
+	return NewSanitizer().BaseName(s)
+}
+func HTML(s string) (output string) {
+	return NewSanitizer().HTML(s)
+}
+func HTMLAllowing(s string, args ...[]string) (string, error) {
+	return NewSanitizer().HTMLAllowing(s, args...)
+}
+func Name(s string) string {
+	return NewSanitizer().Name(s)
+}
+func Path(s string) string {
+	return NewSanitizer().Path(s)
 }
